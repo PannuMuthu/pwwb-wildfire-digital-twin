@@ -78,7 +78,7 @@ const WindControl: React.FC<{
     const y = (e.clientY - rect.top - centerY);
     
     // Calculate direction (in degrees, 0 is north, clockwise)
-    let direction = (Math.atan2(x, y) * 180 / Math.PI + 360) % 360;
+    const direction = (Math.atan2(x, y) * 180 / Math.PI + 360) % 360;
     
     // Calculate speed based on distance from center
     const distance = Math.min(Math.sqrt(x * x + y * y), rect.width / 2);
@@ -165,7 +165,7 @@ const WindControl: React.FC<{
           position: 'absolute',
           bottom: -6,
           left: '50%',
-          transform: 'translateX(-50%) rotate(45deg)',
+          transform: 'translateX(-50%)',
           width: 0,
           height: 0,
           borderLeft: '5px solid transparent',
@@ -439,16 +439,30 @@ const App: React.FC = () => {
               firePolygon: polygon
             }));
             console.log('Fire polygon drawn:', polygon);
+          
+            // Make the polygon draggable
+            map.current!.on('click', (e) => {
+              if (e.features && e.features[0] === polygon) {
+                map.current!.dragRotate.disable();
+                map.current!.dragPan.enable();
+              }
+            });
+          
+            // Make the polygon deletable
+            document.addEventListener('keydown', (e) => {
+              if (e.key === 'Delete') {
+                setSimState(prev => ({
+                  ...prev,
+                  firePolygon: null
+                }));
+                draw.current!.deleteAll();
+                draw.current.changeMode('draw_polygon');
+                map.current!.dragPan.enable();
+                console.log('Fire polygon deleted');
+              }
+            });
           });
-
-          map.current!.on('draw.delete', () => {
-            setSimState(prev => ({
-              ...prev,
-              firePolygon: null
-            }));
-            console.log('Fire polygon deleted');
-          });
-
+          
           map.current!.on('draw.update', (e) => {
             const polygon = e.features[0];
             setSimState(prev => ({
@@ -460,12 +474,13 @@ const App: React.FC = () => {
 
           // Add navigation controls
           map.current!.addControl(new maplibregl.NavigationControl());
-        });
+          });
 
-        map.current.on('error', (e) => {
-          console.error('Map error:', e);
-          setMapError(e.error?.message || 'An error occurred loading the map');
-        });
+
+          map.current.on('error', (e) => {
+            console.error('Map error:', e);
+            setMapError(e.error?.message || 'An error occurred loading the map');
+          });
 
       } catch (error) {
         console.error('Error initializing map:', error);
