@@ -6,7 +6,9 @@ import requests
 import json
 import os
 from dataclasses import dataclass
-from main import WindVector  # Import the WindVector type
+from bs4 import BeautifulSoup
+from models import WindVector
+from hysplitdata_module import HYSPLITData
 
 @dataclass
 class SimulationConfig:
@@ -25,70 +27,102 @@ class FireSimulation:
 
     async def fetch_hrrr_data(self):
         """
-        Fetch HRRR meteorological data from NOAA's API
+        Fetch HRRR meteorological data
         """
-        # TODO: Implement actual HRRR API call
-        # For now, using placeholder wind data with initial conditions
-        times = [
-            self.config.start_time + timedelta(minutes=i * self.config.time_step_minutes)
-            for i in range(int(self.config.duration_hours * 60 / self.config.time_step_minutes))
-        ]
-        
-        # Use initial wind conditions and add some variation over time
-        base_speed = self.config.initial_wind.speed if self.config.initial_wind else 10
-        base_direction = self.config.initial_wind.direction if self.config.initial_wind else 0
-        
-        # Generate wind data with some natural variation around the initial conditions
-        wind_speeds = []
-        wind_directions = []
-        
-        for _ in range(len(times)):
-            # Add random variations to wind speed (±30% of base speed)
-            speed_variation = np.random.uniform(-0.3, 0.3) * base_speed
-            wind_speeds.append(base_speed + speed_variation)
-            
-            # Add random variations to wind direction (±30 degrees)
-            dir_variation = np.random.uniform(-30, 30)
-            wind_directions.append((base_direction + dir_variation) % 360)
-        
+        lat = self.config.start_location[1]
+        lon = self.config.start_location[0]
+        url = f"https://api.weather.gov/points/{lat},{lon}"
+
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        forecast_url = data["properties"]["forecastHourly"]
+        forecast_response = requests.get(forecast_url)
+        forecast_response.raise_for_status()
+        forecast_data = forecast_response.json()
+
+        wind_speed = []
+        wind_direction = []
+        temperature = []
+        humidity = []
+
+        for period in forecast_data["properties"]["periods"]:
+            wind_speed.append(period["windSpeed"])
+            wind_direction.append(period["windDirection"])
+            temperature.append(period["temperature"])
+            humidity.append(period["relativeHumidity"])
+
+        for i in range(len(wind_speed)):
+            wind_speed[i] = float(wind_speed[i][:-4])
+
+        direction_map = {
+            "": 0,
+            "N": 0,
+            "NNE": 22.5,
+            "NE": 45,
+            "ENE": 67.5,
+            "E": 90,
+            "ESE": 112.5,
+            "SE": 135,
+            "SSE": 157.5,
+            "S": 180,
+            "SSW": 202.5,
+            "SW": 225,
+            "WSW": 247.5,
+            "W": 270,
+            "WNW": 292.5,
+            "NW": 315,
+            "NNW": 337.5
+        }
+        for i in range(len(wind_direction)):
+            wind_direction[i] = direction_map[wind_direction[i]]
+
+        for i in range(len(humidity)):
+            humidity[i] = humidity[i]["value"]
+
         self.hrrr_data = {
-            'times': times,
-            'wind_speed': np.array(wind_speeds),
-            'wind_direction': np.array(wind_directions),
-            'temperature': np.random.uniform(20, 30, len(times)),  # Celsius
-            'humidity': np.random.uniform(20, 60, len(times))  # %
+            "times": [datetime.fromisoformat(period["startTime"]) for period in forecast_data["properties"]["periods"]],
+            "wind_speed": wind_speed,
+            "wind_direction": wind_direction,
+            "temperature": temperature,
+            "humidity": humidity
         }
 
     async def run_hysplit(self):
         """
-        Run HYSPLIT model for smoke dispersion
+        Run the HYSPLIT simulation
         """
-        # TODO: Implement actual HYSPLIT API call
-        # For now, generate simplified smoke plume shapes
-        if not self.hrrr_data:
-            await self.fetch_hrrr_data()
+        # Get the extend box for the LA County area
+        lat_bottom, lat_top = 33.9, 34.2
+        lon_bottom, lon_top = -118.4, -118.0
+        extent = (lon_bottom, lon_top, lat_bottom, lat_top)
 
+        # Get HYSPLIT base directory
+        base_dir = os.path.abspath("./hysplit")
+
+        # Setup the hysplit simulation with the HYSPLITData class
+        hysplit_data = HYSPLITData(
+            self.config.start_location,
+            self.config.start_time.strftime("%Y-%m-%d-%H"),
+            (self.config.start_time + timedelta(hours=self.config.duration_hours)).strftime("%Y-%m-%d-%H"),
+            extent,
+            base_dir,
+            os.path.abspath("."),
+            os.path.join(base_dir, "exec"),
+            os.path.join(base_dir, "bdyfiles"),
+            os.path.join(base_dir, "output"),
+            "gdas1.jan25.w2" # TODO: Make this live data
+        )
+
+        print(hysplit_data.data)
+
+        # TODO: Return the smallest polygon that encloses the points
+
+        # filler data
         self.hysplit_data = []
-        lon, lat = self.config.start_location
-
-        for i, time in enumerate(self.hrrr_data['times']):
-            wind_speed = self.hrrr_data['wind_speed'][i]
-            wind_dir = np.radians(self.hrrr_data['wind_direction'][i])
-            
-            # Calculate smoke plume direction and spread
-            dx = wind_speed * np.cos(wind_dir) * i * 0.01
-            dy = wind_speed * np.sin(wind_dir) * i * 0.01
-            
-            # Create a simple triangle-shaped plume
-            plume_coords = [
-                [lon, lat],
-                [lon + dx - dy*0.3, lat + dy + dx*0.3],
-                [lon + dx + dy*0.3, lat + dy - dx*0.3],
-            ]
-            
+        for i in range(len(self.hrrr_data['times'])):
             self.hysplit_data.append({
-                'timestamp': time.isoformat(),
-                'coordinates': [plume_coords]
+                "coordinates": self.config.initial_polygon
             })
 
     def calculate_fire_spread(self) -> List[Dict]:
